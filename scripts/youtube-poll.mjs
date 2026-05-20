@@ -83,7 +83,7 @@ function parseLiveState(html) {
   }
   // Fallback: shortDescription / videoDetails.title fields.
   if (!title) {
-    const td = html.match(/"title":"((?:[^"\]|\.){1,150})"/);
+    const td = html.match(/"title":"([^"]{1,150})"/);
     if (td) title = unescapeJsonString(td[1]);
   }
 
