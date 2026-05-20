@@ -1,0 +1,35 @@
+name: kick-poll
+
+# Calls Kick's /api/v2/channels/{slug} endpoint from rotating GitHub Actions
+# runner IPs and POSTs the results to a Vercel ingest endpoint on the
+# StreamAlert deployment.
+#
+# Triggered externally via the workflow_dispatch REST API (cron-job.org
+# hits the dispatch URL every ~5 minutes).
+#
+# Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
+#   INGEST_URL     - full URL of the Vercel ingest endpoint
+#                    (e.g. https://your-app.vercel.app/api/cron/kick-ingest)
+#   INGEST_SECRET  - must match the CRON_SECRET set on Vercel
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: kick-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run scrape
+        env:
+          INGEST_URL: ${{ secrets.KICK_INGEST_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: node scripts/kick-poll.mjs
