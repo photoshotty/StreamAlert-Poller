@@ -1,19 +1,20 @@
 // Kick Live detection poller.
 //
-// Calls Kick's unauthenticated public-ish JSON endpoint at
-// /api/v2/channels/{slug}. The "livestream" field is null when the
-// channel is offline, or an object with is_live, viewer_count,
-// session_title, id, created_at, categories when live.
+// Was originally calling Kick's unauthenticated /api/v2/channels/{slug}
+// endpoint, which works fine from residential IPs but gets HTTP 403
+// "Request blocked by security policy" from GitHub Actions datacenter
+// IPs (Cloudflare WAF). The user-facing HTML page at /{slug} is not
+// gated the same way, so we scrape that instead.
 //
-// Runs from GitHub Actions, POSTs results to /api/cron/kick-ingest.
+// Live channels emit "is_live":true and "session_title":"..." in the
+// streamed RSC payload. Offline channels render the page but don't
+// emit the livestream object — no "is_live" token anywhere.
 
 const HANDLES = [
-  // Expected live at the time of swap-in.
   "eesiii",
   "krischefgaming",
   "dmoneydlv",
   "jazdawgs",
-  // Stream sometimes.
   "bootlegdeadpool",
 ];
 
@@ -28,21 +29,81 @@ if (!INGEST_SECRET) {
   process.exit(1);
 }
 
-// Kick is API-friendly — minimal headers needed, no signing or CAPTCHA.
-// A real UA is still polite and avoids accidental WAF flags.
-function headers() {
+function browserHeaders() {
   return {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
+    "Accept":
+      "text/html,application/xhtml+xml,application/xml;q=0.9," +
+      "image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Ch-Ua": '"Chromium";v="127", "Not)A;Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
   };
+}
+
+// The HTML page contains Next.js RSC streaming chunks. The livestream
+// object surfaces as escaped JSON within those chunks. We extract by
+// regex rather than full-JSON parse because the document is ~700KB and
+// the wrapper format varies.
+function parseLiveState(html) {
+  const isLiveTrue = /"is_live":\s*true/.test(html);
+  const isLiveFalse = /"is_live":\s*false/.test(html);
+  // Absent means: channel rendered but no livestream object — i.e. offline.
+  if (!isLiveTrue && !isLiveFalse) {
+    return { live: false };
+  }
+  if (!isLiveTrue) {
+    return { live: false };
+  }
+
+  // session_title comes immediately before is_live in the livestream blob.
+  let title = null;
+  const t = html.match(/"session_title":"((?:[^"]|\\")*?)","is_live":\s*true/);
+  if (t) title = unescapeJsonString(t[1]);
+
+  let viewers = null;
+  const v = html.match(/"is_live":\s*true[^}]{0,500}"viewer_count":\s*(\d+)/);
+  if (v) viewers = parseInt(v[1], 10);
+
+  let roomId = null;
+  const r = html.match(/"id":\s*(\d+)[^}]{0,500}"is_live":\s*true/);
+  if (r) roomId = r[1];
+
+  return {
+    live: true,
+    title,
+    viewer_count: Number.isFinite(viewers) ? viewers : null,
+    room_id: roomId,
+  };
+}
+
+function unescapeJsonString(s) {
+  return s.replace(/\\"/g, '"').replace(/\\/g, "\\");
+}
+
+// Recognise Cloudflare/WAF blocks even when status code is 200 (the WAF
+// sometimes returns a challenge page with 200 instead of 403).
+function looksBlocked(text, status) {
+  if (status === 403 || status === 429) return null; // handled by status check
+  if (/Request blocked by security policy/i.test(text)) return "waf_block";
+  if (/cf-mitigated|cf_chl_opt|__cf_chl_jschl_tk/i.test(text)) return "cf_challenge";
+  return null;
 }
 
 async function checkHandle(handle) {
   const slug = handle.toLowerCase();
-  const url = `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`;
+  const url = `https://kick.com/${encodeURIComponent(slug)}`;
   const startedAt = Date.now();
   const row = {
     handle,
@@ -59,10 +120,10 @@ async function checkHandle(handle) {
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
+    const timer = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(url, {
       method: "GET",
-      headers: headers(),
+      headers: browserHeaders(),
       redirect: "follow",
       signal: controller.signal,
     });
@@ -71,8 +132,6 @@ async function checkHandle(handle) {
     const text = await res.text();
 
     if (res.status === 404) {
-      // Channel deleted / never existed — surface explicitly so the
-      // dashboard can show the invalidation rather than misclassify.
       row.outcome = "blocked";
       row.error_kind = "channel_not_found";
       row.error_detail = text.slice(0, 200);
@@ -88,34 +147,19 @@ async function checkHandle(handle) {
           : `http_${res.status}`;
       row.error_detail = text.slice(0, 200);
     } else {
-      let body;
-      try {
-        body = JSON.parse(text);
-      } catch {
+      const blocked = looksBlocked(text, res.status);
+      if (blocked) {
         row.outcome = "blocked";
-        row.error_kind = "non_json";
-        row.error_detail = text.slice(0, 200);
-        row.duration_ms = Date.now() - startedAt;
-        return row;
-      }
-      // Kick may return a Cloudflare challenge wrapped in 200 — detect by
-      // absence of the expected channel shape.
-      if (!body || typeof body !== "object" || !("slug" in body)) {
-        row.outcome = "blocked";
-        row.error_kind = "unexpected_shape";
+        row.error_kind = blocked;
         row.error_detail = text.slice(0, 200);
       } else {
-        const ls = body.livestream;
-        if (!ls) {
-          row.outcome = "offline";
-          row.is_live = false;
-        } else {
-          row.outcome = "live";
-          row.is_live = ls.is_live !== false;
-          row.title = typeof ls.session_title === "string" ? ls.session_title : null;
-          row.viewer_count =
-            typeof ls.viewer_count === "number" ? ls.viewer_count : null;
-          row.room_id = ls.id != null ? String(ls.id) : null;
+        const state = parseLiveState(text);
+        row.is_live = state.live;
+        row.outcome = state.live ? "live" : "offline";
+        if (state.live) {
+          row.title = state.title;
+          row.viewer_count = state.viewer_count;
+          row.room_id = state.room_id;
         }
       }
     }
