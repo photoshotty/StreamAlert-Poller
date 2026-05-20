@@ -1,14 +1,16 @@
-// Kick Live detection poller.
+// Kick Live detection poller (OAuth client-credentials flow).
 //
-// Was originally calling Kick's unauthenticated /api/v2/channels/{slug}
-// endpoint, which works fine from residential IPs but gets HTTP 403
-// "Request blocked by security policy" from GitHub Actions datacenter
-// IPs (Cloudflare WAF). The user-facing HTML page at /{slug} is not
-// gated the same way, so we scrape that instead.
+// Cloudflare WAF blocks unauthenticated requests to both /api/v2 and the
+// HTML /{slug} route from GitHub Actions IPs (verified 2026-05-20:
+// HTTP 403 "Request blocked by security policy" with reference 9e4db7e3).
+// The official api.kick.com/public/v1 endpoint with a Bearer access token
+// is the only path that works from datacenter IPs.
 //
-// Live channels emit "is_live":true and "session_title":"..." in the
-// streamed RSC payload. Offline channels render the page but don't
-// emit the livestream object — no "is_live" token anywhere.
+// Flow per run:
+//   1. POST id.kick.com/oauth/token  -> access_token (~1h TTL)
+//   2. For each handle, GET api.kick.com/public/v1/channels?slug={slug}
+//      with Authorization: Bearer <access_token>
+//   3. data[0].stream is null -> offline; populated -> live.
 
 const HANDLES = [
   "eesiii",
@@ -20,90 +22,41 @@ const HANDLES = [
 
 const INGEST_URL = process.env.INGEST_URL;
 const INGEST_SECRET = process.env.INGEST_SECRET;
-if (!INGEST_URL) {
-  console.error("INGEST_URL not set");
-  process.exit(1);
-}
-if (!INGEST_SECRET) {
-  console.error("INGEST_SECRET not set");
-  process.exit(1);
-}
+const CLIENT_ID = process.env.KICK_CLIENT_ID;
+const CLIENT_SECRET = process.env.KICK_CLIENT_SECRET;
+if (!INGEST_URL) { console.error("INGEST_URL not set"); process.exit(1); }
+if (!INGEST_SECRET) { console.error("INGEST_SECRET not set"); process.exit(1); }
+if (!CLIENT_ID) { console.error("KICK_CLIENT_ID not set"); process.exit(1); }
+if (!CLIENT_SECRET) { console.error("KICK_CLIENT_SECRET not set"); process.exit(1); }
 
-function browserHeaders() {
-  return {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    "Accept":
-      "text/html,application/xhtml+xml,application/xml;q=0.9," +
-      "image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Sec-Ch-Ua": '"Chromium";v="127", "Not)A;Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-  };
-}
+const TOKEN_URL = "https://id.kick.com/oauth/token";
+const API_BASE = "https://api.kick.com/public/v1";
 
-// The HTML page contains Next.js RSC streaming chunks. The livestream
-// object surfaces as escaped JSON within those chunks. We extract by
-// regex rather than full-JSON parse because the document is ~700KB and
-// the wrapper format varies.
-function parseLiveState(html) {
-  const isLiveTrue = /"is_live":\s*true/.test(html);
-  const isLiveFalse = /"is_live":\s*false/.test(html);
-  // Absent means: channel rendered but no livestream object — i.e. offline.
-  if (!isLiveTrue && !isLiveFalse) {
-    return { live: false };
+async function mintAccessToken() {
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+  });
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`token mint failed: ${res.status} ${text.slice(0, 200)}`);
   }
-  if (!isLiveTrue) {
-    return { live: false };
+  const json = JSON.parse(text);
+  if (!json.access_token) {
+    throw new Error(`token response missing access_token: ${text.slice(0, 200)}`);
   }
-
-  // session_title comes immediately before is_live in the livestream blob.
-  let title = null;
-  const t = html.match(/"session_title":"((?:[^"]|\\")*?)","is_live":\s*true/);
-  if (t) title = unescapeJsonString(t[1]);
-
-  let viewers = null;
-  const v = html.match(/"is_live":\s*true[^}]{0,500}"viewer_count":\s*(\d+)/);
-  if (v) viewers = parseInt(v[1], 10);
-
-  let roomId = null;
-  const r = html.match(/"id":\s*(\d+)[^}]{0,500}"is_live":\s*true/);
-  if (r) roomId = r[1];
-
-  return {
-    live: true,
-    title,
-    viewer_count: Number.isFinite(viewers) ? viewers : null,
-    room_id: roomId,
-  };
+  return json.access_token;
 }
 
-function unescapeJsonString(s) {
-  return s.replace(/\\"/g, '"').replace(/\\/g, "\\");
-}
-
-// Recognise Cloudflare/WAF blocks even when status code is 200 (the WAF
-// sometimes returns a challenge page with 200 instead of 403).
-function looksBlocked(text, status) {
-  if (status === 403 || status === 429) return null; // handled by status check
-  if (/Request blocked by security policy/i.test(text)) return "waf_block";
-  if (/cf-mitigated|cf_chl_opt|__cf_chl_jschl_tk/i.test(text)) return "cf_challenge";
-  return null;
-}
-
-async function checkHandle(handle) {
+async function checkHandle(handle, token) {
   const slug = handle.toLowerCase();
-  const url = `https://kick.com/${encodeURIComponent(slug)}`;
+  const url = `${API_BASE}/channels?slug=${encodeURIComponent(slug)}`;
   const startedAt = Date.now();
   const row = {
     handle,
@@ -120,46 +73,70 @@ async function checkHandle(handle) {
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 10000);
     const res = await fetch(url, {
       method: "GET",
-      headers: browserHeaders(),
-      redirect: "follow",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
       signal: controller.signal,
     });
     clearTimeout(timer);
     row.http_status = res.status;
     const text = await res.text();
 
-    if (res.status === 404) {
+    if (res.status === 401 || res.status === 403) {
+      row.outcome = "blocked";
+      row.error_kind = res.status === 401 ? "unauthorized" : "forbidden";
+      row.error_detail = text.slice(0, 200);
+    } else if (res.status === 404) {
       row.outcome = "blocked";
       row.error_kind = "channel_not_found";
       row.error_detail = text.slice(0, 200);
+    } else if (res.status === 429) {
+      row.outcome = "blocked";
+      row.error_kind = "rate_limit";
+      row.error_detail = text.slice(0, 200);
     } else if (!res.ok) {
       row.outcome = "blocked";
-      row.error_kind =
-        res.status === 403
-          ? "forbidden"
-          : res.status === 429
-          ? "rate_limit"
-          : res.status >= 500
-          ? "kick_5xx"
-          : `http_${res.status}`;
+      row.error_kind = res.status >= 500 ? "kick_5xx" : `http_${res.status}`;
       row.error_detail = text.slice(0, 200);
     } else {
-      const blocked = looksBlocked(text, res.status);
-      if (blocked) {
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
         row.outcome = "blocked";
-        row.error_kind = blocked;
+        row.error_kind = "non_json";
+        row.error_detail = text.slice(0, 200);
+        row.duration_ms = Date.now() - startedAt;
+        return row;
+      }
+      const channel = Array.isArray(body?.data) ? body.data[0] : null;
+      if (!channel) {
+        row.outcome = "blocked";
+        row.error_kind = "empty_data";
         row.error_detail = text.slice(0, 200);
       } else {
-        const state = parseLiveState(text);
-        row.is_live = state.live;
-        row.outcome = state.live ? "live" : "offline";
-        if (state.live) {
-          row.title = state.title;
-          row.viewer_count = state.viewer_count;
-          row.room_id = state.room_id;
+        const stream = channel.stream;
+        const liveFlag =
+          stream && typeof stream === "object" && stream.is_live === true;
+        row.is_live = !!liveFlag;
+        row.outcome = liveFlag ? "live" : "offline";
+        if (liveFlag) {
+          row.title =
+            (typeof channel.stream_title === "string" && channel.stream_title) ||
+            (typeof stream.title === "string" && stream.title) ||
+            null;
+          row.viewer_count =
+            typeof stream.viewer_count === "number" ? stream.viewer_count : null;
+          row.room_id =
+            (stream.id != null && String(stream.id)) ||
+            (stream.url != null && String(stream.url)) ||
+            (channel.broadcaster_user_id != null
+              ? String(channel.broadcaster_user_id)
+              : null);
         }
       }
     }
@@ -175,7 +152,56 @@ async function checkHandle(handle) {
 
 async function main() {
   const startedAt = Date.now();
-  const results = await Promise.all(HANDLES.map(checkHandle));
+
+  let token;
+  try {
+    token = await mintAccessToken();
+  } catch (err) {
+    const detail = String(err?.message || err).slice(0, 300);
+    const results = HANDLES.map((handle) => ({
+      handle,
+      http_status: null,
+      outcome: "error",
+      is_live: null,
+      title: null,
+      viewer_count: null,
+      room_id: null,
+      error_kind: "token_mint_failed",
+      error_detail: detail,
+      duration_ms: 0,
+    }));
+    const counts = {
+      total: results.length,
+      ok: 0,
+      live: 0,
+      offline: 0,
+      blocked: 0,
+      error: results.length,
+    };
+    const payload = {
+      source: "github-actions",
+      duration_ms: Date.now() - startedAt,
+      counts,
+      results,
+    };
+    console.log(JSON.stringify({ counts, error: detail }, null, 2));
+    const ingestRes = await fetch(INGEST_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${INGEST_SECRET}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!ingestRes.ok) {
+      console.error(
+        `Ingest failed: ${ingestRes.status} ${await ingestRes.text()}`
+      );
+    }
+    process.exit(1);
+  }
+
+  const results = await Promise.all(HANDLES.map((h) => checkHandle(h, token)));
 
   const counts = results.reduce(
     (acc, r) => {

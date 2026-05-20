@@ -1,16 +1,23 @@
 name: kick-poll
 
-# Calls Kick's /api/v2/channels/{slug} endpoint from rotating GitHub Actions
-# runner IPs and POSTs the results to a Vercel ingest endpoint on the
-# StreamAlert deployment.
+# Calls Kick's official api.kick.com/public/v1/channels endpoint (OAuth
+# client_credentials flow) from rotating GitHub Actions runner IPs and
+# POSTs the results to a Vercel ingest endpoint on the StreamAlert
+# deployment.
+#
+# Cloudflare WAF blocks unauthenticated access to Kick's /api/v2 and the
+# HTML route from datacenter IPs (HTTP 403 with ref:9e4db7e3), so the
+# official OAuth API is the only viable path here.
 #
 # Triggered externally via the workflow_dispatch REST API (cron-job.org
 # hits the dispatch URL every ~5 minutes).
 #
 # Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
-#   INGEST_URL     - full URL of the Vercel ingest endpoint
-#                    (e.g. https://your-app.vercel.app/api/cron/kick-ingest)
-#   INGEST_SECRET  - must match the CRON_SECRET set on Vercel
+#   KICK_INGEST_URL    - full URL of the Vercel ingest endpoint
+#                        (e.g. https://your-app.vercel.app/api/cron/kick-ingest)
+#   INGEST_SECRET      - must match the CRON_SECRET set on Vercel
+#   KICK_CLIENT_ID     - OAuth client ID from kick.com/settings/developer
+#   KICK_CLIENT_SECRET - OAuth client secret from same
 
 on:
   workflow_dispatch:
@@ -32,4 +39,6 @@ jobs:
         env:
           INGEST_URL: ${{ secrets.KICK_INGEST_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          KICK_CLIENT_ID: ${{ secrets.KICK_CLIENT_ID }}
+          KICK_CLIENT_SECRET: ${{ secrets.KICK_CLIENT_SECRET }}
         run: node scripts/kick-poll.mjs
