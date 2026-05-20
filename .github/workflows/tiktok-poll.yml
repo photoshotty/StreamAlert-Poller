@@ -1,4 +1,4 @@
-name: tiktok-test-poll
+name: tiktok-poll
 
 # Scrapes a fixed set of TikTok @handles from GitHub Actions runners
 # (rotating Azure IPs) and POSTs the results to a Vercel ingest endpoint
@@ -10,7 +10,7 @@ name: tiktok-test-poll
 #
 # Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
 #   INGEST_URL     - full URL of the Vercel ingest endpoint
-#                    (e.g. https://your-app.vercel.app/api/cron/tiktok-test-ingest)
+#                    (e.g. https://your-app.vercel.app/api/cron/tiktok-ingest)
 #   INGEST_SECRET  - must match the CRON_SECRET set on Vercel
 #
 # This repo is public to qualify for unlimited free Actions minutes; the
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: tiktok-test-poll
+  group: tiktok-poll
   cancel-in-progress: false
 
 jobs:
@@ -37,4 +37,4 @@ jobs:
         env:
           INGEST_URL: ${{ secrets.INGEST_URL }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
-        run: node scripts/tiktok-test-poll.mjs
+        run: node scripts/tiktok-poll.mjs
