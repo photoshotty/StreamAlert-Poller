@@ -1,0 +1,40 @@
+name: tiktok-test-poll
+
+# Scrapes a fixed set of TikTok @handles from GitHub Actions runners
+# (rotating Azure IPs) and POSTs the results to a Vercel ingest endpoint
+# on the StreamAlert deployment.
+#
+# Triggered externally via the workflow_dispatch REST API (cron-job.org
+# hits the dispatch URL every 5 minutes). GitHub Actions free-tier
+# scheduled workflows are too unreliable for that cadence.
+#
+# Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
+#   INGEST_URL     - full URL of the Vercel ingest endpoint
+#                    (e.g. https://your-app.vercel.app/api/cron/tiktok-test-ingest)
+#   INGEST_SECRET  - must match the CRON_SECRET set on Vercel
+#
+# This repo is public to qualify for unlimited free Actions minutes; the
+# main StreamAlert app code stays in a separate private repo. Secrets
+# remain encrypted and inaccessible to public viewers.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tiktok-test-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run scrape
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        run: node scripts/tiktok-test-poll.mjs
