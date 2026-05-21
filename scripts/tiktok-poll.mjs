@@ -170,6 +170,18 @@ async function checkHandle(handle) {
         if (!state.live && state.status !== 4) {
           row.error_kind = `status_${state.status}`;
         }
+        // Temporary diagnostic: when a live row has no usable thumbnail
+        // URL (null or empty string), dump the full HTML so we can see
+        // what TikTok actually served and write a reliable parse.
+        if (state.live && !row.thumbnail_url) {
+          console.log(
+            `\n===== BEGIN_NO_THUMB_HTML handle=${handle} room=${row.room_id} =====`
+          );
+          console.log(text);
+          console.log(
+            `===== END_NO_THUMB_HTML handle=${handle} =====\n`
+          );
+        }
       }
     }
   } catch (err) {
