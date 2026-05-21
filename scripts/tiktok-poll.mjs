@@ -91,6 +91,13 @@ function parseLiveState(html) {
     room_id:
       (u?.user?.roomId != null ? String(u.user.roomId) : null) ??
       (u?.liveRoom?.id != null ? String(u.liveRoom.id) : null),
+    // liveRoom.coverUrl is the streamer avatar; the actual live frame
+    // snapshot is at liveRoom.squareCoverImg (webcast-oci-tx CDN). It's
+    // a square JPEG that TikTok rotates server-side every ~minute.
+    thumbnail_url:
+      typeof u?.liveRoom?.squareCoverImg === "string"
+        ? u.liveRoom.squareCoverImg
+        : null,
   };
 }
 
@@ -114,6 +121,7 @@ async function checkHandle(handle) {
     title: null,
     viewer_count: null,
     room_id: null,
+    thumbnail_url: null,
     error_kind: null,
     error_detail: null,
     duration_ms: 0,
@@ -158,6 +166,7 @@ async function checkHandle(handle) {
         row.title = state.title;
         row.viewer_count = state.viewer_count;
         row.room_id = state.room_id;
+        row.thumbnail_url = state.live ? state.thumbnail_url : null;
         if (!state.live && state.status !== 4) {
           row.error_kind = `status_${state.status}`;
         }
