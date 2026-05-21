@@ -1,20 +1,12 @@
 // TikTok Live detection poller.
 //
-// Runs from GitHub Actions, triggered by cron-job.org every ~5 minutes.
-// Scrapes each handle's /live page, classifies as live/offline/blocked/error,
-// and POSTs the run to a Vercel ingest endpoint on the StreamAlert deployment.
-//
-// To change the monitored set, edit the HANDLES array below.
-
-const HANDLES = [
-  // Expected live at the time of swap-in (smoke-tests the LIVE detection path).
-  "realgrxnt",
-  "yoyo_savagemike",
-  "nickeh30",
-  // Stream sometimes (mix of live/offline expected over time).
-  "ttvstecksk",
-  "liv4mel",
-];
+// Triggered externally by cron-job.org hitting GitHub Actions
+// workflow_dispatch every ~5 minutes. Fetches the live set of tracked
+// TikTok handles from /api/poll-targets/tiktok on the StreamAlert
+// deployment, scrapes each handle's /live page, classifies as
+// live/offline/blocked/error, and POSTs the run to
+// /api/cron/tiktok-ingest where the shared brain handles DB writes and
+// Telegram alerts.
 
 const INGEST_URL = process.env.INGEST_URL;
 const INGEST_SECRET = process.env.INGEST_SECRET;
@@ -25,6 +17,24 @@ if (!INGEST_URL) {
 if (!INGEST_SECRET) {
   console.error("INGEST_SECRET not set");
   process.exit(1);
+}
+
+function pollTargetsUrl() {
+  const u = new URL(INGEST_URL);
+  return `${u.origin}/api/poll-targets/tiktok`;
+}
+
+async function fetchHandles() {
+  const res = await fetch(pollTargetsUrl(), {
+    headers: { Authorization: `Bearer ${INGEST_SECRET}` },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `poll-targets failed: ${res.status} ${await res.text().catch(() => "")}`
+    );
+  }
+  const json = await res.json();
+  return (json.targets || []).map((t) => t.handle).filter(Boolean);
 }
 
 // Browser-shaped headers. Unauthenticated TikTok requests with a bare
@@ -53,8 +63,6 @@ function browserHeaders() {
 }
 
 // TikTok hydrates the live page from the <script id="SIGI_STATE"> blob.
-// The companion <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"> exists too
-// but on /@user/live it only carries app-context, NOT the live-room state.
 // Empirically (May 2026): user.status === 2 means live, === 4 means offline.
 function extractSigiState(html) {
   const m = html.match(
@@ -86,8 +94,6 @@ function parseLiveState(html) {
   };
 }
 
-// Truthy when the response body looks like TikTok's CAPTCHA challenge
-// page rather than the real /live page.
 function looksLikeChallenge(text) {
   return (
     /captcha-verify-container/i.test(text) ||
@@ -143,9 +149,6 @@ async function checkHandle(handle) {
     } else {
       const state = parseLiveState(text);
       if (!state) {
-        // SIGI_STATE missing/unparseable - either an unknown bot-wall shape
-        // or TikTok changed the page structure. Capture a body sample so
-        // we can tell the two apart from the dump.
         row.outcome = "blocked";
         row.error_kind = "no_sigi_state";
         row.error_detail = text.slice(0, 200);
@@ -155,8 +158,6 @@ async function checkHandle(handle) {
         row.title = state.title;
         row.viewer_count = state.viewer_count;
         row.room_id = state.room_id;
-        // Surface the raw status code on offline-but-not-live so we can
-        // see anything other than the expected 2/4.
         if (!state.live && state.status !== 4) {
           row.error_kind = `status_${state.status}`;
         }
@@ -174,6 +175,13 @@ async function checkHandle(handle) {
 
 async function main() {
   const startedAt = Date.now();
+
+  const HANDLES = await fetchHandles();
+  if (HANDLES.length === 0) {
+    console.log("no tiktok targets tracked, exiting");
+    return;
+  }
+
   const results = await Promise.all(HANDLES.map(checkHandle));
 
   const counts = results.reduce(

@@ -1,36 +1,45 @@
 // Kick Live detection poller (OAuth client-credentials flow).
 //
-// Cloudflare WAF blocks unauthenticated requests to both /api/v2 and the
-// HTML /{slug} route from GitHub Actions IPs (verified 2026-05-20:
-// HTTP 403 "Request blocked by security policy" with reference 9e4db7e3).
-// The official api.kick.com/public/v1 endpoint with a Bearer access token
-// is the only path that works from datacenter IPs.
+// Triggered externally by cron-job.org hitting GitHub Actions
+// workflow_dispatch. Fetches the live set of tracked Kick slugs from
+// /api/poll-targets/kick, looks each up via the official
+// api.kick.com/public/v1 endpoint, and POSTs the batch to
+// /api/cron/kick-ingest.
 //
-// Flow per run:
-//   1. POST id.kick.com/oauth/token  -> access_token (~1h TTL)
-//   2. For each handle, GET api.kick.com/public/v1/channels?slug={slug}
-//      with Authorization: Bearer <access_token>
-//   3. data[0].stream is null -> offline; populated -> live.
-
-const HANDLES = [
-  "eesiii",
-  "krischefgaming",
-  "dmoneydlv",
-  "jazdawgs",
-  "bootlegdeadpool",
-];
+// Cloudflare WAF blocks unauthenticated requests to /api/v2 and the
+// HTML /{slug} route from GitHub Actions IPs (verified 2026-05-20: HTTP
+// 403, ref 9e4db7e3). The official OAuth API is the only path that
+// works from datacenter IPs.
 
 const INGEST_URL = process.env.INGEST_URL;
 const INGEST_SECRET = process.env.INGEST_SECRET;
 const CLIENT_ID = process.env.KICK_CLIENT_ID;
 const CLIENT_SECRET = process.env.KICK_CLIENT_SECRET;
-if (!INGEST_URL) { console.error("INGEST_URL not set"); process.exit(1); }
+if (!INGEST_URL)    { console.error("INGEST_URL not set");    process.exit(1); }
 if (!INGEST_SECRET) { console.error("INGEST_SECRET not set"); process.exit(1); }
-if (!CLIENT_ID) { console.error("KICK_CLIENT_ID not set"); process.exit(1); }
+if (!CLIENT_ID)     { console.error("KICK_CLIENT_ID not set");     process.exit(1); }
 if (!CLIENT_SECRET) { console.error("KICK_CLIENT_SECRET not set"); process.exit(1); }
 
 const TOKEN_URL = "https://id.kick.com/oauth/token";
 const API_BASE = "https://api.kick.com/public/v1";
+
+function pollTargetsUrl() {
+  const u = new URL(INGEST_URL);
+  return `${u.origin}/api/poll-targets/kick`;
+}
+
+async function fetchHandles() {
+  const res = await fetch(pollTargetsUrl(), {
+    headers: { Authorization: `Bearer ${INGEST_SECRET}` },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `poll-targets failed: ${res.status} ${await res.text().catch(() => "")}`
+    );
+  }
+  const json = await res.json();
+  return (json.targets || []).map((t) => t.handle).filter(Boolean);
+}
 
 async function mintAccessToken() {
   const body = new URLSearchParams({
@@ -152,6 +161,12 @@ async function checkHandle(handle, token) {
 
 async function main() {
   const startedAt = Date.now();
+
+  const HANDLES = await fetchHandles();
+  if (HANDLES.length === 0) {
+    console.log("no kick targets tracked, exiting");
+    return;
+  }
 
   let token;
   try {

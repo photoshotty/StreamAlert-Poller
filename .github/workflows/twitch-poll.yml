@@ -1,0 +1,38 @@
+name: twitch-poll
+
+# Calls Twitch Helix /streams from rotating GitHub Actions runner IPs
+# for every Twitch source tracked by StreamAlert, then POSTs the batch
+# to the Vercel ingest endpoint which drives Telegram alerts + DB writes.
+#
+# Triggered externally via the workflow_dispatch REST API (cron-job.org
+# hits the dispatch URL every minute).
+#
+# Required GitHub Actions secrets:
+#   TWITCH_INGEST_URL    - full URL of /api/cron/twitch-ingest
+#   INGEST_SECRET        - must match CRON_SECRET on Vercel
+#   TWITCH_CLIENT_ID     - Twitch app client id
+#   TWITCH_CLIENT_SECRET - Twitch app client secret
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: twitch-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run scrape
+        env:
+          INGEST_URL: ${{ secrets.TWITCH_INGEST_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+        run: node scripts/twitch-poll.mjs

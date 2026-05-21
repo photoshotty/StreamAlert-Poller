@@ -1,23 +1,14 @@
 // YouTube Live detection poller.
 //
-// Scrapes the /@handle/live page for each handle. When the channel is live,
-// YouTube serves the live watch page directly and the HTML contains
-// "isLive":true / "isLiveContent":true markers inside ytInitialPlayerResponse
-// (and a sibling ytInitialData blob). When offline, the URL redirects to the
-// channel home page and those markers are absent.
+// Triggered externally by cron-job.org hitting GitHub Actions
+// workflow_dispatch. Fetches the live set of tracked YouTube handles
+// from /api/poll-targets/youtube, scrapes /@handle/live for each, and
+// POSTs the batch to /api/cron/youtube-ingest where the shared brain
+// handles DB + Telegram side-effects.
 //
-// Per-platform rig — runs from GitHub Actions, POSTs results to the
-// /api/cron/youtube-ingest endpoint on Vercel.
-
-const HANDLES = [
-  // Expected live at the time of swap-in.
-  "Oatleyfn",
-  "Smackojacko_",
-  "RealBatdude",
-  "R3HAN",
-  // Stream sometimes.
-  "HeyKyle",
-];
+// When the channel is live, YouTube serves the live watch page directly
+// and the HTML contains "isLive":true / "isLiveContent":true markers.
+// When offline, the URL redirects to the channel home page.
 
 const INGEST_URL = process.env.INGEST_URL;
 const INGEST_SECRET = process.env.INGEST_SECRET;
@@ -28,6 +19,24 @@ if (!INGEST_URL) {
 if (!INGEST_SECRET) {
   console.error("INGEST_SECRET not set");
   process.exit(1);
+}
+
+function pollTargetsUrl() {
+  const u = new URL(INGEST_URL);
+  return `${u.origin}/api/poll-targets/youtube`;
+}
+
+async function fetchHandles() {
+  const res = await fetch(pollTargetsUrl(), {
+    headers: { Authorization: `Bearer ${INGEST_SECRET}` },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `poll-targets failed: ${res.status} ${await res.text().catch(() => "")}`
+    );
+  }
+  const json = await res.json();
+  return (json.targets || []).map((t) => t.handle).filter(Boolean);
 }
 
 function browserHeaders() {
@@ -53,47 +62,38 @@ function browserHeaders() {
   };
 }
 
-// YouTube serves an HTML page where the live state lives in two embedded
-// JSON blobs (ytInitialPlayerResponse and ytInitialData). We pull the
-// indicator fields directly with regex rather than parsing the whole JSON,
-// because the page is ~1MB and the structure varies.
 function parseLiveState(html) {
-  // Hard live indicators. Both have to be there to count as a live page;
-  // the channel-home redirect doesn't include either.
   const isLive = /"isLive":\s*true/.test(html);
   const isLiveContent = /"isLiveContent":\s*true/.test(html);
   if (!isLive && !isLiveContent) {
     return { live: false };
   }
 
-  // videoId of the current live broadcast — first occurrence is the
-  // currently-playing video on the page.
   const vid = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
   const videoId = vid ? vid[1] : null;
 
-  // Title — most reliable from the <title> tag, which YouTube sets to the
-  // live stream's title (channel-home pages use "Channel Name - YouTube").
+  // Title — from the <title> tag, which YouTube sets to the live stream's
+  // title. Channel-home pages use "Channel Name - YouTube".
   let title = null;
   const titleTag = html.match(/<title>([^<]+)<\/title>/);
   if (titleTag) {
     let t = titleTag[1].trim();
-    // Trim trailing " - YouTube" suffix.
-    t = t.replace(/\s+-\s+YouTube\s*$/i, "");
-    title = decodeEntities(t) || null;
+    // Strip trailing " - YouTube" suffix. The regex allows zero whitespace
+    // before/after the dash so an empty-title channel doesn't leave just
+    // the suffix behind.
+    t = t.replace(/\s*-\s*YouTube\s*$/i, "").trim();
+    title = t || null;
+    if (title) title = decodeEntities(title);
   }
-  // Fallback: shortDescription / videoDetails.title fields.
   if (!title) {
     const td = html.match(/"title":"([^"]{1,150})"/);
     if (td) title = unescapeJsonString(td[1]);
   }
 
-  // Concurrent viewers — gaming streams expose "concurrentViewers" as a
-  // stringified number. Music/passive streams sometimes hide it entirely.
   let viewers = null;
   const cv = html.match(/"concurrentViewers":"(\d+)"/);
   if (cv) viewers = parseInt(cv[1], 10);
   if (viewers === null) {
-    // Some pages render the count as JSON viewCount.runs.text "1,234 watching"
     const vc = html.match(/"viewCount":\{"runs":\[\{"text":"([\d,]+)"\}/);
     if (vc) viewers = parseInt(vc[1].replace(/,/g, ""), 10);
   }
@@ -123,8 +123,6 @@ function unescapeJsonString(s) {
   }
 }
 
-// Recognise YouTube's bot-block / consent-wall patterns. CAPTCHA-class
-// pages don't contain ytInitialPlayerResponse at all.
 function looksBlocked(text) {
   if (/consent\.youtube\.com/i.test(text)) return "consent_wall";
   if (!/ytInitialPlayerResponse|ytInitialData/.test(text)) {
@@ -202,6 +200,13 @@ async function checkHandle(handle) {
 
 async function main() {
   const startedAt = Date.now();
+
+  const HANDLES = await fetchHandles();
+  if (HANDLES.length === 0) {
+    console.log("no youtube targets tracked, exiting");
+    return;
+  }
+
   const results = await Promise.all(HANDLES.map(checkHandle));
 
   const counts = results.reduce(
