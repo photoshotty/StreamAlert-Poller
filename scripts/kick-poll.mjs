@@ -75,6 +75,7 @@ async function checkHandle(handle, token) {
     title: null,
     viewer_count: null,
     room_id: null,
+    category_name: null,
     error_kind: null,
     error_detail: null,
     duration_ms: 0,
@@ -137,6 +138,15 @@ async function checkHandle(handle, token) {
           row.title =
             (typeof channel.stream_title === "string" && channel.stream_title) ||
             (typeof stream.title === "string" && stream.title) ||
+            null;
+          // category.name is Kick's equivalent of Twitch's game_name —
+          // surface it so the brain can write it to live_sessions and
+          // /s analytics can show "most-streamed-on" / game stats.
+          row.category_name =
+            (channel.category &&
+              typeof channel.category === "object" &&
+              typeof channel.category.name === "string" &&
+              channel.category.name) ||
             null;
           row.viewer_count =
             typeof stream.viewer_count === "number" ? stream.viewer_count : null;
