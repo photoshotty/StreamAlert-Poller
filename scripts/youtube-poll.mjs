@@ -164,6 +164,39 @@ function diagSummary(html, reason) {
   const title = titleMatch ? titleMatch[1].slice(0, 80) : "(no <title>)";
   const isLiveCount = (html.match(/"isLive":\s*true/g) || []).length;
   const isLiveNowCount = (html.match(/"isLiveNow":\s*true/g) || []).length;
+
+  // Alternative anchors that may exist on the stripped pre-hydration
+  // SSR shell YouTube hands datacenter IPs. The full page anchors on
+  // "videoDetails":{"videoId":, but the shell doesn't — we expect at
+  // least one of these to point at the live videoId.
+  let canonical = null;
+  const canon = html.match(
+    /<link\s+rel="canonical"\s+href="([^"]+)"/i
+  );
+  if (canon) canonical = canon[1];
+  let ogUrl = null;
+  const og = html.match(
+    /<meta\s+property="og:url"\s+content="([^"]+)"/i
+  );
+  if (og) ogUrl = og[1];
+  // First "videoId":"<11chars>" anywhere on the page — useful only as a
+  // sanity check, since which videoId comes first is unreliable.
+  let firstVid = null;
+  const fv = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+  if (fv) firstVid = fv[1];
+  // 200-char window around the lone isLive:true so we can see the
+  // surrounding JSON shape and find a stable anchor.
+  let isLiveContext = null;
+  if (isLiveCount > 0) {
+    const idx = html.search(/"isLive":\s*true/);
+    if (idx !== -1) {
+      isLiveContext = html.slice(
+        Math.max(0, idx - 100),
+        Math.min(html.length, idx + 100)
+      );
+    }
+  }
+
   return [
     `reason=${reason}`,
     `len=${html.length}`,
@@ -173,6 +206,10 @@ function diagSummary(html, reason) {
     `ypr=${html.includes("ytInitialPlayerResponse") ? 1 : 0}`,
     `yid=${html.includes("ytInitialData") ? 1 : 0}`,
     `title=${JSON.stringify(title)}`,
+    `canonical=${JSON.stringify(canonical)}`,
+    `og_url=${JSON.stringify(ogUrl)}`,
+    `first_videoId=${JSON.stringify(firstVid)}`,
+    `isLive_ctx=${JSON.stringify(isLiveContext)}`,
   ].join(" ");
 }
 
