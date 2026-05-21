@@ -63,37 +63,31 @@ function browserHeaders() {
 }
 
 function parseLiveState(html) {
-  // "isLive":true sits on the player's current videoDetails block and
-  // is cleared the moment the broadcast ends. "isLiveNow":true is the
-  // secondary anchor inside liveBroadcastDetails. We deliberately do
-  // NOT trust "isLiveContent":true — that field stays true on VODs of
-  // any past live stream, so when /@handle/live for an offline channel
-  // redirects to the channel's most recent past-live VOD, the page
-  // still carries isLiveContent and we'd falsely declare the channel
-  // live (pinned to whatever stale video got loaded).
-  const isLive = /"isLive":\s*true/.test(html);
-  const isLiveNow = /"isLiveNow":\s*true/.test(html);
-  if (!isLive && !isLiveNow) {
-    return { live: false };
-  }
-
-  // videoId of the player's actually-loaded video. The page contains
-  // dozens of "videoId":"..." strings (recommendations, watch-next
-  // endpoints, sidebar items) — first-match grabs whichever happens
-  // to come first in the HTML, which is often NOT the live stream.
-  // ytInitialPlayerResponse.videoDetails.videoId is the canonical
-  // anchor: that's the video the player is currently loaded with.
-  let videoId = null;
-  const vidDetails = html.match(
-    /"videoDetails":\{"videoId":"([a-zA-Z0-9_-]{11})"/
-  );
-  if (vidDetails) {
-    videoId = vidDetails[1];
-  } else {
-    // Safety net for HTML shape changes — fall back to first match.
-    const anyVid = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-    if (anyVid) videoId = anyVid[1];
-  }
+  // Everything anchors on the player's videoDetails block. /@handle/live
+  // can return three shapes:
+  //   1) the actual live watch page — videoDetails describes the live
+  //      video and "isLive":true sits ~100 chars into the block.
+  //   2) the channel home page — no videoDetails block at all, declare
+  //      offline immediately.
+  //   3) some other watch page (e.g. YouTube routing datacenter IPs to
+  //      a popular trending stream) — videoDetails is present but for
+  //      a different video. We have no way to know the channel's UC id
+  //      from inside the poller, so we accept the videoDetails the page
+  //      gives us; the upstream brain will not open the wrong session
+  //      provided the channel's not actually live (since the misrouted
+  //      page typically lacks isLive:true within the block).
+  //
+  // We do NOT trust loose "isLive":true / "isLiveNow":true matches.
+  // The HTML often carries them in carousels of currently-live
+  // recommendations on the channel-home shape, which were the cause of
+  // the original false-positives.
+  const idx = html.indexOf('"videoDetails":{"videoId":');
+  if (idx === -1) return { live: false };
+  const block = html.slice(idx, idx + 4000);
+  if (!/"isLive":\s*true/.test(block)) return { live: false };
+  const vidMatch = block.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+  if (!vidMatch) return { live: false };
+  const videoId = vidMatch[1];
 
   // Title — from the <title> tag, which YouTube sets to the live stream's
   // title. Channel-home pages use "Channel Name - YouTube".
