@@ -94,8 +94,13 @@ function parseLiveState(html) {
     // liveRoom.coverUrl is the streamer avatar; the actual live frame
     // snapshot is at liveRoom.squareCoverImg (webcast-oci-tx CDN). It's
     // a square JPEG that TikTok rotates server-side every ~minute.
+    // squareCoverImg is "" for PC / LIVE-Studio streams whose snapshot
+    // has not been generated server-side yet. Coerce to null so we
+    // do not store junk; a later refresh tick will pick up a real URL
+    // if TikTok ever produces one.
     thumbnail_url:
-      typeof u?.liveRoom?.squareCoverImg === "string"
+      typeof u?.liveRoom?.squareCoverImg === "string" &&
+      u.liveRoom.squareCoverImg !== ""
         ? u.liveRoom.squareCoverImg
         : null,
   };
@@ -169,18 +174,6 @@ async function checkHandle(handle) {
         row.thumbnail_url = state.live ? state.thumbnail_url : null;
         if (!state.live && state.status !== 4) {
           row.error_kind = `status_${state.status}`;
-        }
-        // Temporary diagnostic: when a live row has no usable thumbnail
-        // URL (null or empty string), dump the full HTML so we can see
-        // what TikTok actually served and write a reliable parse.
-        if (state.live && !row.thumbnail_url) {
-          console.log(
-            `\n===== BEGIN_NO_THUMB_HTML handle=${handle} room=${row.room_id} =====`
-          );
-          console.log(text);
-          console.log(
-            `===== END_NO_THUMB_HTML handle=${handle} =====\n`
-          );
         }
       }
     }
