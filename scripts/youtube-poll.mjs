@@ -63,9 +63,17 @@ function browserHeaders() {
 }
 
 function parseLiveState(html) {
+  // "isLive":true sits on the player's current videoDetails block and
+  // is cleared the moment the broadcast ends. "isLiveNow":true is the
+  // secondary anchor inside liveBroadcastDetails. We deliberately do
+  // NOT trust "isLiveContent":true — that field stays true on VODs of
+  // any past live stream, so when /@handle/live for an offline channel
+  // redirects to the channel's most recent past-live VOD, the page
+  // still carries isLiveContent and we'd falsely declare the channel
+  // live (pinned to whatever stale video got loaded).
   const isLive = /"isLive":\s*true/.test(html);
-  const isLiveContent = /"isLiveContent":\s*true/.test(html);
-  if (!isLive && !isLiveContent) {
+  const isLiveNow = /"isLiveNow":\s*true/.test(html);
+  if (!isLive && !isLiveNow) {
     return { live: false };
   }
 
