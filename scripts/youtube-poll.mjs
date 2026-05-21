@@ -63,62 +63,90 @@ function browserHeaders() {
 }
 
 function parseLiveState(html) {
-  // Everything anchors on the player's videoDetails block. /@handle/live
-  // can return three shapes:
-  //   1) the actual live watch page — videoDetails describes the live
-  //      video and "isLive":true sits ~100 chars into the block.
-  //   2) the channel home page — no videoDetails block at all, declare
-  //      offline immediately.
-  //   3) some other watch page (e.g. YouTube routing datacenter IPs to
-  //      a popular trending stream) — videoDetails is present but for
-  //      a different video. We have no way to know the channel's UC id
-  //      from inside the poller, so we accept the videoDetails the page
-  //      gives us; the upstream brain will not open the wrong session
-  //      provided the channel's not actually live (since the misrouted
-  //      page typically lacks isLive:true within the block).
+  // /@handle/live can return three page shapes:
+  //   1) Full watch page — has ytInitialPlayerResponse.videoDetails
+  //      with isLive:true. This is what residential IPs get.
+  //   2) Stripped pre-hydration SSR shell — YouTube serves this to
+  //      suspected bot/datacenter IPs (GitHub Actions runners hit it
+  //      every time). ytInitialPlayerResponse is reduced to a
+  //      LOGIN_REQUIRED stub ("Sign in to confirm you're not a bot")
+  //      and the <title> tag is empty, but ytInitialData (the
+  //      watch-next response) is fully populated, including
+  //      videoPrimaryInfoRenderer with the live title and a
+  //      videoViewCountRenderer carrying isLive:true, plus a
+  //      currentVideoEndpoint pointing at the loaded video.
+  //   3) Channel-home page (offline) — no videoDetails, no
+  //      currentVideoEndpoint, no isLive:true anywhere.
   //
-  // We do NOT trust loose "isLive":true / "isLiveNow":true matches.
-  // The HTML often carries them in carousels of currently-live
-  // recommendations on the channel-home shape, which were the cause of
-  // the original false-positives.
-  const idx = html.indexOf('"videoDetails":{"videoId":');
-  if (idx === -1) return { live: false, reason: "no_videodetails" };
-  const block = html.slice(idx, idx + 4000);
-  if (!/"isLive":\s*true/.test(block)) {
-    return { live: false, reason: "no_islive_in_block" };
+  // The required signal across (1) and (2) is "isLive":true somewhere
+  // on the page; that field doesn't appear on (3). The reliable
+  // videoId anchor across (1) and (2) is currentVideoEndpoint —
+  // emitted exactly once per page, points at the loaded video, never
+  // appears for recommendations.
+  if (!/"isLive":\s*true/.test(html)) {
+    return { live: false, reason: "no_islive" };
   }
-  const vidMatch = block.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-  if (!vidMatch) return { live: false, reason: "no_videoid_in_block" };
-  const videoId = vidMatch[1];
 
-  // Title — from the <title> tag, which YouTube sets to the live stream's
-  // title. Channel-home pages use "Channel Name - YouTube".
-  let title = null;
-  const titleTag = html.match(/<title>([^<]+)<\/title>/);
-  if (titleTag) {
-    let t = titleTag[1].trim();
-    // Strip trailing " - YouTube" suffix. The regex allows zero whitespace
-    // before/after the dash so an empty-title channel doesn't leave just
-    // the suffix behind.
-    t = t.replace(/\s*-\s*YouTube\s*$/i, "").trim();
-    title = t || null;
-    if (title) title = decodeEntities(title);
+  // Prefer videoDetails when it's there — it's the canonical anchor
+  // on the full page, and we want isLive:true scoped to that block
+  // (not just any loose match) before trusting it.
+  const vdIdx = html.indexOf('"videoDetails":{"videoId":');
+  if (vdIdx !== -1) {
+    const block = html.slice(vdIdx, vdIdx + 4000);
+    if (/"isLive":\s*true/.test(block)) {
+      const m = block.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+      if (m) return finalizeLiveState(html, m[1]);
+    }
+    // videoDetails exists but isn't the live broadcast — fall through
+    // to the currentVideoEndpoint path. If that also fails we'll
+    // declare offline.
   }
+
+  // SSR-shell fallback: currentVideoEndpoint anchors the videoId even
+  // when ytInitialPlayerResponse has been stripped to a stub.
+  const cve = html.match(
+    /"currentVideoEndpoint":[^]{0,500}?"videoId":"([a-zA-Z0-9_-]{11})"/
+  );
+  if (cve) return finalizeLiveState(html, cve[1]);
+
+  return { live: false, reason: "no_anchor" };
+}
+
+function finalizeLiveState(html, videoId) {
+  // Title — videoPrimaryInfoRenderer is the SSR-shell-friendly source
+  // (works when the <title> tag is empty and videoDetails is absent).
+  // Falls back to videoDetails.title, then the <title> tag.
+  let title = null;
+  const primary = html.match(
+    /"videoPrimaryInfoRenderer":\{[^]{0,300}?"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.){1,200})"/
+  );
+  if (primary) title = unescapeJsonString(primary[1]);
   if (!title) {
-    // Prefer videoDetails.title since the loose match could pull a
-    // recommendation's title from sidebars / suggested videos.
     const td = html.match(
       /"videoDetails":\{[^}]*?"title":"((?:[^"\\]|\\.){1,200})"/
     );
     if (td) title = unescapeJsonString(td[1]);
   }
+  if (!title) {
+    const t = html.match(/<title>([^<]+)<\/title>/);
+    if (t) {
+      let s = t[1].trim().replace(/\s*-\s*YouTube\s*$/i, "").trim();
+      if (s) title = decodeEntities(s);
+    }
+  }
 
+  // Viewer count — videoViewCountRenderer's first run is the live
+  // concurrent count on both page shapes. Falls back to the raw
+  // concurrentViewers field on the full page.
   let viewers = null;
-  const cv = html.match(/"concurrentViewers":"(\d+)"/);
-  if (cv) viewers = parseInt(cv[1], 10);
-  if (viewers === null) {
-    const vc = html.match(/"viewCount":\{"runs":\[\{"text":"([\d,]+)"\}/);
-    if (vc) viewers = parseInt(vc[1].replace(/,/g, ""), 10);
+  const vcr = html.match(
+    /"videoViewCountRenderer":\{[^]{0,200}?"runs":\[\{"text":"([\d,]+)"/
+  );
+  if (vcr) {
+    viewers = parseInt(vcr[1].replace(/,/g, ""), 10);
+  } else {
+    const cv = html.match(/"concurrentViewers":"(\d+)"/);
+    if (cv) viewers = parseInt(cv[1], 10);
   }
 
   return {
