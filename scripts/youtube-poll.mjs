@@ -69,8 +69,23 @@ function parseLiveState(html) {
     return { live: false };
   }
 
-  const vid = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-  const videoId = vid ? vid[1] : null;
+  // videoId of the player's actually-loaded video. The page contains
+  // dozens of "videoId":"..." strings (recommendations, watch-next
+  // endpoints, sidebar items) — first-match grabs whichever happens
+  // to come first in the HTML, which is often NOT the live stream.
+  // ytInitialPlayerResponse.videoDetails.videoId is the canonical
+  // anchor: that's the video the player is currently loaded with.
+  let videoId = null;
+  const vidDetails = html.match(
+    /"videoDetails":\{"videoId":"([a-zA-Z0-9_-]{11})"/
+  );
+  if (vidDetails) {
+    videoId = vidDetails[1];
+  } else {
+    // Safety net for HTML shape changes — fall back to first match.
+    const anyVid = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+    if (anyVid) videoId = anyVid[1];
+  }
 
   // Title — from the <title> tag, which YouTube sets to the live stream's
   // title. Channel-home pages use "Channel Name - YouTube".
@@ -86,7 +101,11 @@ function parseLiveState(html) {
     if (title) title = decodeEntities(title);
   }
   if (!title) {
-    const td = html.match(/"title":"([^"]{1,150})"/);
+    // Prefer videoDetails.title since the loose match could pull a
+    // recommendation's title from sidebars / suggested videos.
+    const td = html.match(
+      /"videoDetails":\{[^}]*?"title":"((?:[^"\\]|\\.){1,200})"/
+    );
     if (td) title = unescapeJsonString(td[1]);
   }
 
