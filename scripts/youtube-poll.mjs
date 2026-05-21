@@ -184,6 +184,20 @@ function diagSummary(html, reason) {
   let firstVid = null;
   const fv = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
   if (fv) firstVid = fv[1];
+  // All videoIds + counts. On the full-shape live page the live videoId
+  // wins clearly (21 vs 13 vs 7s on l1wenFN local). If the SSR shell
+  // preserves that ranking we have a stable fallback anchor; this probe
+  // tells us.
+  const allMatches = Array.from(
+    html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)
+  ).map((m) => m[1]);
+  const idCounts = new Map();
+  for (const id of allMatches) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+  const topFreq = Array.from(idCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([id, n]) => `${id}=${n}`)
+    .join(",");
   // 200-char window around the lone isLive:true so we can see the
   // surrounding JSON shape and find a stable anchor.
   let isLiveContext = null;
@@ -209,6 +223,9 @@ function diagSummary(html, reason) {
     `canonical=${JSON.stringify(canonical)}`,
     `og_url=${JSON.stringify(ogUrl)}`,
     `first_videoId=${JSON.stringify(firstVid)}`,
+    `vid_freq=${topFreq}`,
+    `unique_videoIds=${idCounts.size}`,
+    `total_videoId_refs=${allMatches.length}`,
     `isLive_ctx=${JSON.stringify(isLiveContext)}`,
   ].join(" ");
 }
@@ -272,6 +289,17 @@ async function checkHandle(handle) {
           // YouTube served us a degraded HTML shape that no longer has
           // the expected videoDetails anchor.
           row.error_detail = diagSummary(text, state.reason || "unknown");
+          // If the page CARRIED an "isLive":true marker but we still
+          // bailed (no videoDetails / no live in block), the page is the
+          // stripped pre-hydration SSR shell — dump the whole HTML to
+          // the github-actions log so we can inspect it directly and
+          // pick a stable fallback anchor. Gated on isLive presence to
+          // avoid spamming the log for genuinely-offline channels.
+          if (/"isLive":\s*true/.test(text)) {
+            console.log(`=== HTML DUMP for handle=${handle} (len=${text.length}) ===`);
+            console.log(text);
+            console.log(`=== END HTML DUMP for handle=${handle} ===`);
+          }
         }
       }
     }
