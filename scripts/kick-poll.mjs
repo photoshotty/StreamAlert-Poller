@@ -76,6 +76,7 @@ async function checkHandle(handle, token) {
     viewer_count: null,
     room_id: null,
     category_name: null,
+    thumbnail_url: null,
     error_kind: null,
     error_detail: null,
     duration_ms: 0,
@@ -150,6 +151,10 @@ async function checkHandle(handle, token) {
             null;
           row.viewer_count =
             typeof stream.viewer_count === "number" ? stream.viewer_count : null;
+          // stream.thumbnail was added to the public v1 channels response
+          // on 2025-04-07. Bare-URL on the stream object — not nested.
+          row.thumbnail_url =
+            (typeof stream.thumbnail === "string" && stream.thumbnail) || null;
           row.room_id =
             (stream.id != null && String(stream.id)) ||
             (stream.url != null && String(stream.url)) ||
@@ -191,6 +196,7 @@ async function main() {
       title: null,
       viewer_count: null,
       room_id: null,
+      thumbnail_url: null,
       error_kind: "token_mint_failed",
       error_detail: detail,
       duration_ms: 0,
