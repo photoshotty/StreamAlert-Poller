@@ -47,7 +47,7 @@ Set under **Settings → Secrets and variables → Actions**:
 | Name | Value |
 | --- | --- |
 | `TWITCH_INGEST_URL`   | `https://your-app.vercel.app/api/cron/twitch-ingest` |
-| `INGEST_URL`          | TikTok ingest URL: `https://your-app.vercel.app/api/cron/tiktok-ingest` |
+| `INGEST_URL`          | `https://your-app.vercel.app/api/cron/tiktok-ingest` |
 | `YOUTUBE_INGEST_URL`  | `https://your-app.vercel.app/api/cron/youtube-ingest` |
 | `KICK_INGEST_URL`     | `https://your-app.vercel.app/api/cron/kick-ingest` |
 | `INGEST_SECRET`       | bearer token shared across all four workflows; must match `CRON_SECRET` on the StreamAlert deployment |
