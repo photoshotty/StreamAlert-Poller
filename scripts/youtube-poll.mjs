@@ -82,11 +82,13 @@ function parseLiveState(html) {
   // recommendations on the channel-home shape, which were the cause of
   // the original false-positives.
   const idx = html.indexOf('"videoDetails":{"videoId":');
-  if (idx === -1) return { live: false };
+  if (idx === -1) return { live: false, reason: "no_videodetails" };
   const block = html.slice(idx, idx + 4000);
-  if (!/"isLive":\s*true/.test(block)) return { live: false };
+  if (!/"isLive":\s*true/.test(block)) {
+    return { live: false, reason: "no_islive_in_block" };
+  }
   const vidMatch = block.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-  if (!vidMatch) return { live: false };
+  if (!vidMatch) return { live: false, reason: "no_videoid_in_block" };
   const videoId = vidMatch[1];
 
   // Title — from the <title> tag, which YouTube sets to the live stream's
@@ -152,6 +154,28 @@ function looksBlocked(text) {
   return null;
 }
 
+// Compact one-line dump of the live-state signals on the HTML the poller
+// just fetched. Surfaced in row.error_detail when the page parsed as
+// "offline" so we can tell whether YouTube served a degraded shape to
+// the GitHub Actions IP (no ytInitialPlayerResponse, no videoDetails,
+// channel-home title, etc.) without dumping the whole 1MB document.
+function diagSummary(html, reason) {
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/);
+  const title = titleMatch ? titleMatch[1].slice(0, 80) : "(no <title>)";
+  const isLiveCount = (html.match(/"isLive":\s*true/g) || []).length;
+  const isLiveNowCount = (html.match(/"isLiveNow":\s*true/g) || []).length;
+  return [
+    `reason=${reason}`,
+    `len=${html.length}`,
+    `vd=${html.includes('"videoDetails":{"videoId":') ? 1 : 0}`,
+    `isLive=${isLiveCount}`,
+    `isLiveNow=${isLiveNowCount}`,
+    `ypr=${html.includes("ytInitialPlayerResponse") ? 1 : 0}`,
+    `yid=${html.includes("ytInitialData") ? 1 : 0}`,
+    `title=${JSON.stringify(title)}`,
+  ].join(" ");
+}
+
 async function checkHandle(handle) {
   const url = `https://www.youtube.com/@${encodeURIComponent(handle)}/live`;
   const startedAt = Date.now();
@@ -206,6 +230,11 @@ async function checkHandle(handle) {
           row.title = state.title;
           row.viewer_count = state.viewer_count;
           row.room_id = state.video_id;
+        } else {
+          // Diagnostic only — no behavior change. Helps tell whether
+          // YouTube served us a degraded HTML shape that no longer has
+          // the expected videoDetails anchor.
+          row.error_detail = diagSummary(text, state.reason || "unknown");
         }
       }
     }
